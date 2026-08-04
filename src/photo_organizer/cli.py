@@ -1,9 +1,11 @@
 """Command-line entry point.
 
-Commands are read-only preview/debug helpers for now:
 - no arguments: prints a bare banner
 - ``inspect``: print metadata for a single photo
 - ``location-preview``: per-day dominant locations (no files are moved)
+- ``plan``: preview the full pipeline without touching files
+- ``import``: run the full pipeline and (optionally) apply it via the
+  executor — dry-run by default, ``--execute`` to copy
 """
 
 from __future__ import annotations
@@ -13,13 +15,20 @@ from typing import Annotated
 
 import typer
 
+from photo_organizer.config import Config, load_config
 from photo_organizer.domain.models import PhotoRecord
+from photo_organizer.executor import ExecutionReport, Executor
 from photo_organizer.location.cache import GeocodingCache
 from photo_organizer.location.geocoder import NominatimGeocoder
 from photo_organizer.location.models import LocationMode
 from photo_organizer.location.resolver import DailyLocationResolver
 from photo_organizer.metadata.reader import ExifReader, MetadataError
-from photo_organizer.pipeline.preview import default_components, render_report, run_preview
+from photo_organizer.pipeline.preview import (
+    PreviewReport,
+    default_components,
+    render_report,
+    run_preview,
+)
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
@@ -137,6 +146,81 @@ def plan(
         dry_run=dry_run,
     )
     typer.echo(render_report(report, limit))
+
+
+@app.command("import")
+def import_photos(
+    source: Annotated[Path, typer.Argument(help="Source directory to scan for photos.")],
+    destination: Annotated[
+        Path, typer.Argument(help="Destination root for the organized tree.")
+    ],
+    execute: Annotated[
+        bool,
+        typer.Option(help="Apply the plan (copy files); default is a dry-run preview."),
+    ] = False,
+) -> None:
+    """Import photos from SOURCE into DESTINATION (dry-run unless --execute).
+
+    Runs discover -> metadata -> location resolver -> planner -> executor.
+    Without ``--execute`` the executor rehearses only: nothing is created,
+    copied, or deleted.
+    """
+    if not source.is_dir():
+        typer.echo(f"Error: source is not a directory: {source}", err=True)
+        raise typer.Exit(code=1)
+
+    components = default_components()
+    preview = run_preview(
+        source, destination, components, location_mode=LocationMode.ARCHIVE
+    )
+    config = _import_config(source, destination, execute)
+    report = Executor(config).execute(preview.actions)
+    typer.echo(render_import_report(preview, report))
+
+
+def _import_config(source: Path, destination: Path, execute: bool) -> Config:
+    """Build the executor config for an import from the user's Config."""
+    base = load_config()
+    return Config(
+        inbox=str(source),
+        dest_root=str(destination),
+        mode=base.mode,
+        dry_run=not execute,
+        log_path=base.log_path,
+    )
+
+
+def render_import_report(preview: PreviewReport, report: ExecutionReport) -> str:
+    """Render the import summary: pipeline counts plus the executor report."""
+    header = "Import Preview" if report.dry_run else "Import"
+    mode = "dry_run" if report.dry_run else "execute"
+    final = (
+        "Dry-run mode. No files were modified."
+        if report.dry_run
+        else "Files copied successfully."
+    )
+    return "\n".join(
+        [
+            header,
+            "=" * len(header),
+            "",
+            f"Source: {preview.source}",
+            f"Destination: {preview.dest_root}",
+            "",
+            f"Files discovered: {preview.discovered_count}",
+            f"Metadata: {preview.metadata_ok}",
+            f"Planned: {len(preview.actions)}",
+            "",
+            "Execution:",
+            "",
+            f"{mode}:",
+            f"success:{report.success}",
+            f"failed:{report.failed}",
+            f"skipped:{report.skipped}",
+            "",
+            final,
+        ]
+    )
 
 
 def _collect_photos(path: Path) -> list[Path]:
