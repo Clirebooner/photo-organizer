@@ -24,12 +24,14 @@ class Config:
         dest_root: root of the organized output tree
         mode:      how files are applied: "copy" | "move" | "symlink"
         dry_run:   when True, plan but do not touch the filesystem
+        log_path:  where the executor writes its log (file log)
     """
 
     inbox: str = "~/Pictures/Inbox"
     dest_root: str = "~/Pictures/Organized"
     mode: str = "copy"
     dry_run: bool = True
+    log_path: str = "logs/photo_organizer.log"
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> Config:
@@ -48,4 +50,5 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> Config:
         dest_root=str(data.get("dest_root", Config.dest_root)),
         mode=str(data.get("mode", Config.mode)),
         dry_run=bool(data.get("dry_run", Config.dry_run)),
+        log_path=str(data.get("log_path", Config.log_path)),
     )

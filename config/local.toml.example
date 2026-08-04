@@ -5,3 +5,4 @@ inbox = "~/Pictures/Inbox"
 dest_root = "~/Pictures/Organized"
 mode = "copy"
 dry_run = true
+log_path = "logs/photo_organizer.log"
