@@ -1,0 +1,10 @@
+# Photo Organizer — default configuration (MVP)
+#
+# Loader falls back to built-in defaults when a key is missing, so this
+# file is optional. Copy it to config/local.toml (gitignored) and edit
+# that copy for your own machine.
+
+inbox = "~/Pictures/Inbox"          # where new photos land (SD card mount / download folder)
+dest_root = "~/Pictures/Organized"  # root of the organized output tree
+mode = "copy"                       # copy | move | symlink
+dry_run = true                      # true: plan only, never touch the filesystem

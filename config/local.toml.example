@@ -1,0 +1,7 @@
+# Copy me to config/local.toml and adjust for your machine.
+# config/local.toml is gitignored, so it will not be committed.
+
+inbox = "~/Pictures/Inbox"
+dest_root = "~/Pictures/Organized"
+mode = "copy"
+dry_run = true

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photo-organizer"
+version = "0.1.0"
+description = "Organize Nikon camera photos into a clean, dated folder structure."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Clirebooner" }]
+dependencies = [
+    "exifread>=3.0",
+    "geopy>=2.4",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+photo-organizer = "photo_organizer.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/photo_organizer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["photo_organizer"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["geopy.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
