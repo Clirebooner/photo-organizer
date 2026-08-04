@@ -158,6 +158,8 @@ def render_report(report: PreviewReport, limit: int = 20) -> str:
             result = report.location_results[day]
             lines.append(f"{day} {result.location_name}")
             lines.append(f"{result.total_photos} photos")
+            if result.location_name == "Unknown_Location":
+                lines.append(f"reason: {result.reason}")
             lines.append("")
     else:
         lines.append("(no photos)")

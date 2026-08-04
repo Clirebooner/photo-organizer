@@ -4,7 +4,8 @@ Turns a :class:`LocationInfo` into a short, filename-safe location name
 for a given :class:`LocationMode`:
 
 - ``archive`` — folder names; broad, archive-friendly (scenic area /
-  city over a specific POI).
+  attraction over a specific POI; non-CJK municipality type words such
+  as "Resort Municipality" are stripped).
 - ``detail`` — logs/preview; the most specific place (POI first).
 - ``admin`` — pure administrative division.
 
@@ -77,6 +78,18 @@ _KR_ALIASES = {
     "수원": "水原",
 }
 
+# Administrative type words stripped from non-CJK municipality names in
+# *archive* output (longest first). OSM often carries the full legal type
+# — "Whistler Resort Municipality", "Halifax Regional Municipality" — which
+# is too bureaucratic for a folder name; a plain name like "Central Saanich"
+# has no suffix and is left untouched.
+_MUNICIPALITY_SUFFIXES = (
+    "Regional Municipality",
+    "Resort Municipality",
+    "District Municipality",
+    "Municipality",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -125,6 +138,21 @@ def _strip_suffixes(name: str, suffixes: tuple[str, ...]) -> str:
     for suffix in sorted(suffixes, key=len, reverse=True):
         if name.endswith(suffix) and len(name) > len(suffix):
             return name[: -len(suffix)]
+    return name
+
+
+def _strip_municipality_suffix(name: str) -> str:
+    """Drop a trailing administrative type from a municipality name.
+
+    Only the type words are removed — "Whistler Resort Municipality" ->
+    "Whistler" — and a plain place name such as "Central Saanich" is left
+    untouched.
+    """
+    for suffix in _MUNICIPALITY_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            stripped = name[: -len(suffix)].strip()
+            if stripped:
+                return stripped
     return name
 
 
@@ -181,13 +209,24 @@ class LocationNameNormalizer:
         return self._cn_archive(info)
 
     def _archive_non_cjk(self, info: LocationInfo) -> str | None:
-        """Scenic area first, then city/town/locality, then admin, then country."""
+        """Scenic area, then attraction/tourism, then city/town/locality, then admin.
+
+        Overseas archives read most naturally as a scenic area or place,
+        so administrative granularity only kicks in after the named places.
+        Municipality names drop their legal type word (e.g. "Whistler
+        Resort Municipality" -> "Whistler").
+        """
+        municipality = (
+            _strip_municipality_suffix(info.municipality) if info.municipality else None
+        )
         return _first(
             info.park_name,
+            info.poi_name,
             info.city,
             info.town,
             info.locality,
-            info.municipality,
+            info.village,
+            municipality,
             info.admin2,
             info.admin1,
             info.country,

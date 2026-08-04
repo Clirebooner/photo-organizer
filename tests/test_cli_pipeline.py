@@ -151,6 +151,35 @@ def test_plan_runs_full_pipeline_preview(tmp_path, monkeypatch) -> None:
     assert not dest_root.exists()  # target tree is never created
 
 
+def test_plan_shows_unknown_location_reason(tmp_path, monkeypatch) -> None:
+    source, paths = _make_source(tmp_path, ["DSC_0001.NEF"])
+    dest_root = tmp_path / "out"
+
+    unknown = DailyLocationResult(
+        date=_DAY,
+        location_name="Unknown_Location",
+        total_photos=1,
+        photos_with_gps=1,
+        dominant_count=1,
+        dominant_ratio=1.0,
+        confidence="none",
+        reason="geocoder failed",
+        detailed_places=[],
+    )
+    _patch_components(
+        monkeypatch,
+        [_discovered(paths[0])],
+        [_record(paths[0])],
+        {_DAY: unknown},
+    )
+
+    result = runner.invoke(app, ["plan", str(source), str(dest_root)])
+
+    assert result.exit_code == 0, result.output
+    assert f"{_DAY} Unknown_Location" in result.stdout
+    assert "reason: geocoder failed" in result.stdout
+
+
 def test_plan_does_not_call_executor(tmp_path, monkeypatch) -> None:
     source, paths = _make_source(tmp_path, ["DSC_0001.NEF"])
     dest_root = tmp_path / "out"

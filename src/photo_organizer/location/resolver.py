@@ -25,6 +25,11 @@ _CONFIDENCE_MEDIUM = "medium"
 _CONFIDENCE_HIGH = "high"
 _CONFIDENCE_MANUAL = "manual"
 
+# Why a day came out ``Unknown_Location`` (surfaced in previews/logs).
+_UNKNOWN_NO_GPS = "no GPS data for this day"
+_UNKNOWN_GEOCODER_FAILED = "geocoder failed"
+_UNKNOWN_NO_SUITABLE_NAME = "no suitable location name for the resolved place"
+
 
 class DailyLocationResolver:
     """Resolves one dominant location name per date for a batch of photos."""
@@ -122,7 +127,7 @@ class DailyLocationResolver:
                 dominant_count=0,
                 dominant_ratio=0.0,
                 confidence=_CONFIDENCE_NONE,
-                reason="no GPS data for this day",
+                reason=_UNKNOWN_NO_GPS,
                 detailed_places=[],
             )
 
@@ -135,18 +140,24 @@ class DailyLocationResolver:
 
         cluster_names: dict[int, str] = {}
         cluster_details: dict[int, str] = {}
+        cluster_geocoded: dict[int, bool] = {}  # True when the lookup succeeded
         for index, cluster in enumerate(clusters):
             info = self._location_info(*cluster.centroid)
-            cluster_names[index] = (
-                normalizer.normalize(info) if info is not None else "Unknown_Location"
-            )
-            cluster_details[index] = (
-                detail_normalizer.normalize(info) if info is not None else "Unknown_Location"
-            )
+            if info is None:
+                cluster_geocoded[index] = False
+                cluster_names[index] = "Unknown_Location"
+                cluster_details[index] = "Unknown_Location"
+            else:
+                cluster_geocoded[index] = True
+                cluster_names[index] = normalizer.normalize(info)
+                cluster_details[index] = detail_normalizer.normalize(info)
 
         counts: Counter[str] = Counter()
+        cluster_photo_counts: Counter[int] = Counter()
         for _, point in gps_pairs:
-            counts[cluster_names[point_to_cluster[point]]] += 1
+            index = point_to_cluster[point]
+            cluster_photo_counts[index] += 1
+            counts[cluster_names[index]] += 1
 
         top = counts.most_common()
         first_name, first_count = top[0]
@@ -155,7 +166,7 @@ class DailyLocationResolver:
 
         if first_name == "Unknown_Location":
             location_name, confidence = "Unknown_Location", _CONFIDENCE_NONE
-            reason = "could not resolve the dominant location (geocoding failed)"
+            reason = _unknown_reason(cluster_names, cluster_geocoded, cluster_photo_counts)
         elif ratio >= 0.6:
             location_name, confidence = first_name, _CONFIDENCE_HIGH
             reason = f"{first_name} covers {ratio:.0%} of the GPS photos"
@@ -223,3 +234,26 @@ def _manual_result(
         reason=why,
         detailed_places=[],
     )
+
+
+def _unknown_reason(
+    cluster_names: dict[int, str],
+    cluster_geocoded: dict[int, bool],
+    cluster_photo_counts: Counter[int],
+) -> str:
+    """Explain why the dominant location came out ``Unknown_Location``.
+
+    The dominant unknown cluster decides the category: one that never
+    geocoded means the lookup failed; one that geocoded but yielded no
+    usable name means the place had no suitable name.
+    """
+    dominant = max(
+        (index for index, name in cluster_names.items() if name == "Unknown_Location"),
+        key=cluster_photo_counts.__getitem__,
+        default=None,
+    )
+    if dominant is None:
+        return _UNKNOWN_NO_SUITABLE_NAME
+    if not cluster_geocoded[dominant]:
+        return _UNKNOWN_GEOCODER_FAILED
+    return _UNKNOWN_NO_SUITABLE_NAME

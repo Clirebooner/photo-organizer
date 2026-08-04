@@ -236,6 +236,71 @@ def test_admin_prefers_admin_division() -> None:
     assert _norm(info, LocationMode.ADMIN) == "San_Francisco"
 
 
+def test_archive_uses_attraction_over_city() -> None:
+    info = LocationInfo(
+        country_code="CA",
+        country="Canada",
+        city="Whistler",
+        poi_name="Whistler Blackcomb",
+    )
+    assert _norm(info, LocationMode.ARCHIVE) == "Whistler_Blackcomb"
+
+
+def test_archive_still_prefers_park_over_attraction() -> None:
+    info = LocationInfo(
+        country_code="CA",
+        country="Canada",
+        city="Whistler",
+        park_name="Whistler Olympic Park",
+        poi_name="Whistler Blackcomb",
+    )
+    assert _norm(info, LocationMode.ARCHIVE) == "Whistler_Olympic_Park"
+
+
+def test_archive_uses_locality_over_municipality() -> None:
+    info = LocationInfo(
+        country_code="CA",
+        country="Canada",
+        locality="Whistler Creek",
+        municipality="Whistler Resort Municipality",
+    )
+    assert _norm(info, LocationMode.ARCHIVE) == "Whistler_Creek"
+
+
+# ---------------------------------------------------------------------------
+# Non-CJK municipality suffix stripping (archive only)
+# ---------------------------------------------------------------------------
+
+
+def test_archive_strips_resort_municipality_suffix() -> None:
+    info = LocationInfo(
+        country_code="CA", country="Canada", municipality="Whistler Resort Municipality"
+    )
+    assert _norm(info, LocationMode.ARCHIVE) == "Whistler"
+
+
+def test_archive_strips_regional_municipality_suffix() -> None:
+    info = LocationInfo(
+        country_code="CA", country="Canada", municipality="Halifax Regional Municipality"
+    )
+    assert _norm(info, LocationMode.ARCHIVE) == "Halifax"
+
+
+def test_archive_keeps_plain_municipality_name() -> None:
+    info = LocationInfo(
+        country_code="CA", country="Canada", municipality="Central Saanich"
+    )
+    assert _norm(info, LocationMode.ARCHIVE) == "Central_Saanich"
+
+
+def test_municipality_suffix_kept_outside_archive() -> None:
+    info = LocationInfo(
+        country_code="CA", country="Canada", municipality="Whistler Resort Municipality"
+    )
+    assert _norm(info, LocationMode.ADMIN) == "Whistler_Resort_Municipality"
+    assert _norm(info, LocationMode.DETAIL) == "Whistler_Resort_Municipality"
+
+
 # ---------------------------------------------------------------------------
 # Resolver
 # ---------------------------------------------------------------------------
@@ -251,6 +316,26 @@ def test_no_gps_unknown(tmp_path: Path) -> None:
     assert result.location_name == "Unknown_Location"
     assert result.confidence == "none"
     assert result.photos_with_gps == 0
+    assert result.reason == "no GPS data for this day"
+
+
+def test_unknown_reason_geocoder_failed(tmp_path: Path) -> None:
+    day = date(2026, 6, 5)
+    geo = FakeGeocoder({_key(22.54, 113.92): GeocodingError("network down")})
+    record = _photo(day, (22.54, 113.92))
+    result = _resolver(geo, tmp_path).resolve([record])[day]
+    assert result.location_name == "Unknown_Location"
+    assert result.reason == "geocoder failed"
+
+
+def test_unknown_reason_no_suitable_location(tmp_path: Path) -> None:
+    day = date(2026, 6, 5)
+    # Geocoding succeeds but the result carries no usable name fields.
+    geo = FakeGeocoder({_key(22.54, 113.92): LocationInfo()})
+    record = _photo(day, (22.54, 113.92))
+    result = _resolver(geo, tmp_path).resolve([record])[day]
+    assert result.location_name == "Unknown_Location"
+    assert result.reason == "no suitable location name for the resolved place"
 
 
 def test_high_confidence_dominant(tmp_path: Path) -> None:
