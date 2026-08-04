@@ -19,6 +19,7 @@ from photo_organizer.location.geocoder import NominatimGeocoder
 from photo_organizer.location.models import LocationMode
 from photo_organizer.location.resolver import DailyLocationResolver
 from photo_organizer.metadata.reader import ExifReader, MetadataError
+from photo_organizer.pipeline.preview import default_components, render_report, run_preview
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
@@ -98,6 +99,44 @@ def location_preview(
         typer.echo(f"Reason: {result.reason}")
         typer.echo(f"Detailed places: {', '.join(result.detailed_places)}")
         typer.echo("")
+
+
+@app.command()
+def plan(
+    source: Annotated[Path, typer.Argument(help="Source directory to scan for photos.")],
+    dest_root: Annotated[Path, typer.Argument(help="Destination root for the organized tree.")],
+    limit: Annotated[
+        int, typer.Option(help="Maximum planned actions to show (default 20).")
+    ] = 20,
+    location_mode: Annotated[
+        LocationMode, typer.Option(help="Naming mode: archive | detail | admin.")
+    ] = LocationMode.ARCHIVE,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Preview only; no files are touched (default on).",
+        ),
+    ] = True,
+) -> None:
+    """Preview the full pipeline for a photo directory (read-only).
+
+    Runs discover -> metadata -> location resolver -> planner and prints
+    the plan without copying, moving, or creating anything. The executor
+    is never invoked.
+    """
+    if not source.is_dir():
+        typer.echo(f"Error: source is not a directory: {source}", err=True)
+        raise typer.Exit(code=1)
+
+    report = run_preview(
+        source,
+        dest_root,
+        default_components(),
+        location_mode=location_mode,
+        dry_run=dry_run,
+    )
+    typer.echo(render_report(report, limit))
 
 
 def _collect_photos(path: Path) -> list[Path]:

@@ -70,7 +70,7 @@
 | `executor` | 执行/演练 copy/move/symlink；唯一写目标盘文件的模块 | 🔧 接口已建 |
 | `watcher` | 监听收件箱，新文件出现即触发管道 | 🔧 接口已建 |
 | `location/*` | GPS 反向地理编码 + 地点命名（archive/detail/admin + CJK）+ 每日主导地点 | ✅ 已实现（fake geocoder 测试 + 真实照片验证） |
-| `cli` | 参数解析、调用管道 | ✅ 已实现（横幅 + `inspect` + `location-preview`） |
+| `cli` | 参数解析、调用管道 | ✅ 已实现（横幅 + `inspect` + `location-preview` + `plan`） |
 | `discover` / `enrich` | 扫文件、去重/GPS/地点富化 | 🚫 蓝图 |
 | `reporting` / `storage` | 日志汇总 / SQLite 入库 | 🚫 蓝图 |
 
@@ -101,7 +101,7 @@ photo-organizer/
 ├── src/
 │   └── photo_organizer/
 │       ├── __init__.py         # 包版本
-│       ├── cli.py              # Typer 入口（MVP：仅输出 "Photo Organizer"）
+│       ├── cli.py              # Typer 入口（inspect / location-preview / plan）
 │       ├── config.py           # tomllib 读取配置 → Config dataclass
 │       ├── domain/
 │       │   ├── __init__.py
@@ -260,6 +260,8 @@ dry_run = true                        # true: 只规划不落盘
 .venv/bin/photo-organizer inspect <path>   # 单文件元数据调试（NEF/JPG）
 .venv/bin/photo-organizer location-preview <file|folder> [--mode archive|detail|admin] [--location-name TEXT]
                                          # 每日主导地点预览（只读，不移动文件）
+.venv/bin/photo-organizer plan <source> <dest_root> [--limit N] [--location-mode archive|detail|admin]
+                                         # 只读跑完整管道：discover→metadata→location→planner（预览报告，不落盘）
 .venv/bin/python -m pytest          # 跑测试
 .venv/bin/ruff check src tests      # lint
 .venv/bin/mypy src                  # 类型检查
