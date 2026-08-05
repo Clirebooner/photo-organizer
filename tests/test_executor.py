@@ -16,7 +16,7 @@ import pytest
 
 from photo_organizer.config import Config
 from photo_organizer.domain.models import ActionKind, PlannedAction
-from photo_organizer.executor import Executor
+from photo_organizer.executor import Executor, ProgressOutcome
 
 
 def _config(tmp_path: Path, *, dry_run: bool = True) -> Config:
@@ -198,3 +198,103 @@ def test_report_counts(tmp_path: Path) -> None:
     assert report.failed == 0
     assert report.errors == []
     assert report.total == report.success + report.failed + report.skipped
+
+
+# ---------------------------------------------------------------------------
+# Progress reporter
+# ---------------------------------------------------------------------------
+
+
+class RecordingReporter:
+    """Records progress events for assertions; renders nothing."""
+
+    def __init__(self) -> None:
+        self.begin_total: int | None = None
+        self.started: list[str] = []
+        self.done: list[tuple[str, str, int]] = []  # (outcome, filename, size)
+        self.end_counts: tuple[int, int, int] | None = None
+
+    def begin(self, total: int) -> None:
+        self.begin_total = total
+
+    def file_starting(self, filename: str) -> None:
+        self.started.append(filename)
+
+    def file_done(self, outcome: ProgressOutcome, filename: str, size: int) -> None:
+        self.done.append((outcome.value, filename, size))
+
+    def end(self, success: int, failed: int, skipped: int) -> None:
+        self.end_counts = (success, failed, skipped)
+
+
+def test_progress_reporter_begin_and_end_counts(tmp_path: Path) -> None:
+    source = _write(tmp_path / "a.NEF", b"x" * 100)
+    reporter = RecordingReporter()
+
+    Executor(_config(tmp_path, dry_run=False)).execute(
+        [_action(source, tmp_path / "out" / "a.NEF")], reporter=reporter
+    )
+
+    assert reporter.begin_total == 1
+    assert reporter.end_counts == (1, 0, 0)
+
+
+def test_progress_reporter_copy_success_reports_name_and_size(tmp_path: Path) -> None:
+    source = _write(tmp_path / "src.NEF", b"y" * 2048)
+    reporter = RecordingReporter()
+
+    Executor(_config(tmp_path, dry_run=False)).execute(
+        [_action(source, tmp_path / "out" / "src.NEF")], reporter=reporter
+    )
+
+    assert reporter.started == ["src.NEF"]
+    assert reporter.done == [("copied", "src.NEF", 2048)]
+
+
+def test_progress_reporter_skipped_and_failed(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.NEF", b"a")
+    existing = _write(tmp_path / "out" / "b.NEF", b"old")
+    b = _write(tmp_path / "b.NEF", b"b")
+    missing = tmp_path / "missing.NEF"
+    reporter = RecordingReporter()
+
+    Executor(_config(tmp_path, dry_run=False)).execute(
+        [
+            _action(a, tmp_path / "out" / "a.NEF"),
+            _action(b, existing),  # skipped: destination exists
+            _action(missing, tmp_path / "out" / "missing.NEF"),  # failed
+        ],
+        reporter=reporter,
+    )
+
+    assert reporter.started == ["a.NEF"]  # never "starting" a skipped/failed file
+    assert reporter.done == [
+        ("copied", "a.NEF", 1),
+        ("skipped", "b.NEF", 0),
+        ("failed", "missing.NEF", 0),
+    ]
+    assert reporter.end_counts == (1, 1, 1)
+
+
+def test_progress_reporter_default_none_still_works(tmp_path: Path) -> None:
+    source = _write(tmp_path / "src.NEF", b"x")
+
+    report = Executor(_config(tmp_path, dry_run=False)).execute(
+        [_action(source, tmp_path / "out" / "src.NEF")]
+    )
+
+    assert report.success == 1
+
+
+def test_progress_reporter_not_called_in_dry_run(tmp_path: Path) -> None:
+    source = _write(tmp_path / "src.NEF", b"x")
+    reporter = RecordingReporter()
+
+    Executor(_config(tmp_path, dry_run=True)).execute(
+        [_action(source, tmp_path / "out" / "src.NEF")], reporter=reporter
+    )
+
+    assert reporter.begin_total is None
+    assert reporter.started == []
+    assert reporter.done == []
+    assert reporter.end_counts is None

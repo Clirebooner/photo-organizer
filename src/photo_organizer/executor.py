@@ -8,7 +8,8 @@ The only module allowed to write to the destination tree. Honors
 - **Copy** mode applies ``COPY`` actions with :func:`shutil.copy2` (file
   metadata preserved), never overwrites an existing destination, checks
   the copied size against the source, and never lets one failed file stop
-  the batch.
+  the batch. An optional :class:`ProgressReporter` receives per-action
+  events in copy mode only — a dry run never triggers a single event.
 
 ``MOVE``/``SYMLINK`` are not implemented in v1 and are counted as
 skipped; a source file is never deleted.
@@ -20,7 +21,9 @@ import logging
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
+from typing import Protocol
 
 from photo_organizer.config import Config
 from photo_organizer.domain.models import ActionKind, PlannedAction
@@ -48,6 +51,44 @@ class ExecutionReport:
     errors: list[str] = field(default_factory=list)
 
 
+class ProgressOutcome(StrEnum):
+    """The terminal result of one planned action, for progress reporting."""
+
+    COPIED = "copied"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+class ProgressReporter(Protocol):
+    """Receives execution progress events; implementations must not block.
+
+    The executor only calls this protocol — it never imports Rich or any
+    presentation library — so a reporter can be a terminal progress bar, a
+    test spy, or anything else. It is invoked **only in copy mode**: a dry
+    run never triggers a single event.
+    """
+
+    def begin(self, total: int) -> None:
+        """Called once, before the first action, with the batch size."""
+        ...
+
+    def file_starting(self, filename: str) -> None:
+        """Called immediately before an actual copy of *filename* starts."""
+        ...
+
+    def file_done(self, outcome: ProgressOutcome, filename: str, size: int) -> None:
+        """Called exactly once per action, after it resolves.
+
+        ``size`` is the number of bytes copied on ``COPIED``; it is 0 for
+        ``SKIPPED`` and ``FAILED``.
+        """
+        ...
+
+    def end(self, success: int, failed: int, skipped: int) -> None:
+        """Called once, after the last action, with the final counts."""
+        ...
+
+
 class Executor:
     """Performs (or rehearses) a batch of planned actions."""
 
@@ -55,7 +96,11 @@ class Executor:
         """Create an executor bound to *config* (honors dry_run/mode)."""
         self._config = config
 
-    def execute(self, actions: Sequence[PlannedAction]) -> ExecutionReport:
+    def execute(
+        self,
+        actions: Sequence[PlannedAction],
+        reporter: ProgressReporter | None = None,
+    ) -> ExecutionReport:
         """Apply *actions* to the filesystem and return a report.
 
         Dry-run (the default) only logs ``source -> destination``; copy
@@ -63,6 +108,10 @@ class Executor:
         :func:`shutil.copy2`, and validates the copied size. An existing
         destination is skipped (never overwritten), non-COPY kinds are
         skipped, and a failed action never stops the batch.
+
+        *reporter* (optional) receives progress events in copy mode only;
+        a dry run never invokes it. The returned report stays the source
+        of truth for counts.
         """
         _ensure_log_file(self._config.log_path)
 
@@ -71,6 +120,9 @@ class Executor:
         failed = 0
         skipped = 0
         errors: list[str] = []
+
+        if reporter is not None and not self._config.dry_run:
+            reporter.begin(total)
 
         for action in actions:
             if self._config.dry_run:
@@ -85,24 +137,48 @@ class Executor:
                     action.dest,
                     action.kind.value,
                 )
+                _report_done(reporter, ProgressOutcome.SKIPPED, action.source.name, 0)
                 continue
             if action.dest.exists():
                 skipped += 1
                 logger.info(
                     "skip %s -> %s (destination exists)", action.source, action.dest
                 )
+                _report_done(reporter, ProgressOutcome.SKIPPED, action.source.name, 0)
+                continue
+            if not action.source.is_file():
+                failed += 1
+                errors.append(
+                    f"{action.source} -> {action.dest}: source does not exist: {action.source}"
+                )
+                logger.error(
+                    "failed %s -> %s: source does not exist", action.source, action.dest
+                )
+                _report_done(reporter, ProgressOutcome.FAILED, action.source.name, 0)
                 continue
 
+            if reporter is not None:
+                reporter.file_starting(action.source.name)
             try:
                 self._copy(action)
             except Exception as exc:  # one bad file must not stop the batch
                 failed += 1
                 errors.append(f"{action.source} -> {action.dest}: {exc}")
                 logger.error("failed %s -> %s: %s", action.source, action.dest, exc)
+                _report_done(reporter, ProgressOutcome.FAILED, action.source.name, 0)
                 continue
 
             success += 1
             logger.info("copied %s -> %s", action.source, action.dest)
+            _report_done(
+                reporter,
+                ProgressOutcome.COPIED,
+                action.source.name,
+                action.source.stat().st_size,
+            )
+
+        if reporter is not None and not self._config.dry_run:
+            reporter.end(success, failed, skipped)
 
         return ExecutionReport(
             total=total,
@@ -129,6 +205,17 @@ class Executor:
                 "size mismatch after copy: "
                 f"{action.source.stat().st_size} != {action.dest.stat().st_size}"
             )
+
+
+def _report_done(
+    reporter: ProgressReporter | None,
+    outcome: ProgressOutcome,
+    filename: str,
+    size: int,
+) -> None:
+    """Forward one per-action outcome to *reporter*, if any."""
+    if reporter is not None:
+        reporter.file_done(outcome, filename, size)
 
 
 def _same_size(source: Path, dest: Path) -> bool:

@@ -11,9 +11,10 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
-from photo_organizer.cli import app
+from photo_organizer.cli import _use_progress, app
 from photo_organizer.config import Config
 from photo_organizer.discover.models import DiscoveredFile
 from photo_organizer.discover.models import MediaKind as DiscoverMediaKind
@@ -290,3 +291,46 @@ def test_import_parses_source_and_destination(tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert f"Source: {source}" in result.stdout
     assert f"Destination: {dest}" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Progress bar gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("execute", "no_progress", "isatty", "expected"),
+    [
+        (True, False, True, True),  # copy to a terminal -> show
+        (True, False, False, False),  # copy but piped -> hide
+        (True, True, True, False),  # opted out -> hide
+        (True, True, False, False),
+        (False, False, True, False),  # dry-run -> never show
+        (False, True, True, False),
+    ],
+)
+def test_use_progress_gate(
+    execute: bool, no_progress: bool, isatty: bool, expected: bool
+) -> None:
+    assert _use_progress(execute, no_progress, isatty) is expected
+
+
+def test_import_execute_no_progress_when_not_tty(tmp_path, monkeypatch) -> None:
+    source, dest = _one_file(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["import", str(source), str(dest), "--execute"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""  # no TTY under CliRunner -> no Rich progress on stderr
+    assert "Files copied successfully." in result.stdout
+
+
+def test_import_execute_accepts_no_progress_flag(tmp_path, monkeypatch) -> None:
+    source, dest = _one_file(tmp_path, monkeypatch)
+
+    result = runner.invoke(
+        app, ["import", str(source), str(dest), "--execute", "--no-progress"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Files copied successfully." in result.stdout

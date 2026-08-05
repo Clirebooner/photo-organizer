@@ -12,6 +12,7 @@ authors = [{ name = "Clirebooner" }]
 dependencies = [
     "exifread>=3.0",
     "geopy>=2.4",
+    "rich>=13.8",
     "typer>=0.12",
 ]
 

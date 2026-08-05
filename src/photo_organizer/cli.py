@@ -10,14 +10,28 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    ProgressColumn,
+    Task,
+    TaskID,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
+from rich.text import Text
 
 from photo_organizer.config import Config, load_config
 from photo_organizer.domain.models import PhotoRecord
-from photo_organizer.executor import ExecutionReport, Executor
+from photo_organizer.executor import ExecutionReport, Executor, ProgressOutcome
 from photo_organizer.location.cache import GeocodingCache
 from photo_organizer.location.geocoder import NominatimGeocoder
 from photo_organizer.location.models import LocationMode
@@ -158,12 +172,17 @@ def import_photos(
         bool,
         typer.Option(help="Apply the plan (copy files); default is a dry-run preview."),
     ] = False,
+    no_progress: Annotated[
+        bool,
+        typer.Option(help="Disable the progress bar even when copying to a terminal."),
+    ] = False,
 ) -> None:
     """Import photos from SOURCE into DESTINATION (dry-run unless --execute).
 
     Runs discover -> metadata -> location resolver -> planner -> executor.
     Without ``--execute`` the executor rehearses only: nothing is created,
-    copied, or deleted.
+    copied, or deleted. With ``--execute`` a Rich progress bar is shown on
+    stderr while copying (unless ``--no-progress`` or not a terminal).
     """
     if not source.is_dir():
         typer.echo(f"Error: source is not a directory: {source}", err=True)
@@ -174,7 +193,17 @@ def import_photos(
         source, destination, components, location_mode=LocationMode.ARCHIVE
     )
     config = _import_config(source, destination, execute)
-    report = Executor(config).execute(preview.actions)
+
+    if _use_progress(execute, no_progress, sys.stderr.isatty()):
+        progress = RichProgressBar()
+        progress.start()
+        try:
+            report = Executor(config).execute(preview.actions, reporter=progress)
+        finally:
+            progress.stop()
+    else:
+        report = Executor(config).execute(preview.actions)
+
     typer.echo(render_import_report(preview, report))
 
 
@@ -232,6 +261,110 @@ def _collect_photos(path: Path) -> list[Path]:
     return sorted(
         p for p in path.rglob("*") if p.suffix.lower() in _SUPPORTED_PHOTO_SUFFIXES
     )
+
+
+def _use_progress(execute: bool, no_progress: bool, isatty: bool) -> bool:
+    """Whether to show the Rich progress bar on stderr.
+
+    A progress bar is meaningful only while files are actually copied
+    (``--execute``), the user did not opt out, and stderr is a terminal —
+    piped or captured output must stay free of ANSI / ``\\r`` sequences.
+    """
+    return execute and not no_progress and isatty
+
+
+class _TransferBytesColumn(ProgressColumn):
+    """Live byte-transfer speed (MB/s) for the copy batch.
+
+    The built-in ``TransferSpeedColumn`` keys off ``task.completed``, but
+    here ``completed`` counts *files*, not bytes — so MB/s is derived from
+    the task's ``bytes_copied`` field and wall time.
+    """
+
+    def render(self, task: Task) -> Text:
+        elapsed = task.elapsed
+        if not elapsed or elapsed <= 0:
+            return Text("? MB/s", style="progress.data.speed")
+        bytes_per_sec = task.fields.get("bytes_copied", 0) / elapsed
+        return Text(f"{bytes_per_sec / (1024 * 1024):.1f} MB/s", style="progress.data.speed")
+
+
+class RichProgressBar:
+    """Rich progress bar for one copy batch, written to stderr.
+
+    Output goes to stderr so the stdout report stays parseable. The bar's
+    ``completed/total`` counts files; MB/s and ETA are byte/time based.
+    Only constructed for ``--execute`` runs on a terminal (see
+    :func:`_use_progress`) — never for dry runs, where the executor does
+    not invoke the reporter anyway.
+    """
+
+    def __init__(self) -> None:
+        self._progress = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),  # "3/5"
+            TaskProgressColumn(),  # "60%"
+            _TransferBytesColumn(),
+            TimeRemainingColumn(),
+            TextColumn("{task.fields[counts]}"),
+            console=Console(stderr=True),
+        )
+        self._task: TaskID | None = None
+        self._files_done = 0
+        self._bytes_copied = 0
+        self._success = 0
+        self._failed = 0
+        self._skipped = 0
+
+    def start(self) -> None:
+        """Start the live display (before executing the batch)."""
+        self._progress.start()
+
+    def stop(self) -> None:
+        """Stop the live display (after the batch)."""
+        self._progress.stop()
+
+    # -- ProgressReporter ---------------------------------------------------
+
+    def begin(self, total: int) -> None:
+        self._task = self._progress.add_task(
+            "copying…",
+            total=total,
+            counts="✓0 ✗0 −0",
+            bytes_copied=0,
+        )
+
+    def file_starting(self, filename: str) -> None:
+        if self._task is not None:
+            self._progress.update(self._task, description=f"copying {filename}")
+
+    def file_done(self, outcome: ProgressOutcome, filename: str, size: int) -> None:
+        if self._task is None:
+            return
+        if outcome == ProgressOutcome.COPIED:
+            self._success += 1
+            self._bytes_copied += size
+        elif outcome == ProgressOutcome.SKIPPED:
+            self._skipped += 1
+        else:
+            self._failed += 1
+        self._files_done += 1
+        self._progress.update(
+            self._task,
+            advance=1,
+            description=f"done {filename}",
+            counts=f"✓{self._success} ✗{self._failed} −{self._skipped}",
+            bytes_copied=self._bytes_copied,
+        )
+
+    def end(self, success: int, failed: int, skipped: int) -> None:
+        if self._task is not None:
+            self._progress.update(
+                self._task,
+                description="done",
+                counts=f"✓{self._success} ✗{self._failed} −{self._skipped}",
+            )
 
 
 if __name__ == "__main__":
