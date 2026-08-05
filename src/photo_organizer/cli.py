@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import signal
 import sys
 from pathlib import Path
+from types import FrameType
 from typing import Annotated
 
 import typer
@@ -30,6 +32,7 @@ from rich.progress import (
 from rich.text import Text
 
 from photo_organizer.config import Config, load_config
+from photo_organizer.discover.models import DiscoveredFile
 from photo_organizer.domain.models import PhotoRecord
 from photo_organizer.executor import ExecutionReport, Executor, ProgressOutcome
 from photo_organizer.location.cache import GeocodingCache
@@ -38,10 +41,19 @@ from photo_organizer.location.models import LocationMode
 from photo_organizer.location.resolver import DailyLocationResolver
 from photo_organizer.metadata.reader import ExifReader, MetadataError
 from photo_organizer.pipeline.preview import (
+    PipelineComponents,
     PreviewReport,
     default_components,
     render_report,
     run_preview,
+)
+from photo_organizer.planner import plan as plan_actions
+from photo_organizer.watch_state import WatchState
+from photo_organizer.watcher import (
+    DEFAULT_INTERVAL,
+    DEFAULT_QUIET,
+    DEFAULT_SETTLE,
+    Watcher,
 )
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -205,6 +217,158 @@ def import_photos(
         report = Executor(config).execute(preview.actions)
 
     typer.echo(render_import_report(preview, report))
+
+
+@app.command()
+def watch(
+    inbox: Annotated[
+        Path | None, typer.Argument(help="Inbox to watch (default: config inbox).")
+    ] = None,
+    dest_root: Annotated[
+        Path | None, typer.Argument(help="Destination root (default: config dest_root).")
+    ] = None,
+    execute: Annotated[
+        bool,
+        typer.Option(help="Copy files; default is a dry-run preview (nothing written)."),
+    ] = False,
+    interval: Annotated[
+        float, typer.Option(help="Poll interval in seconds (default 2).")
+    ] = DEFAULT_INTERVAL,
+    settle: Annotated[
+        float,
+        typer.Option(help="Seconds a file's size/mtime must stay stable (default 5)."),
+    ] = DEFAULT_SETTLE,
+    quiet: Annotated[
+        float,
+        typer.Option(help="Seconds of inbox quiet before a batch fires (default 30)."),
+    ] = DEFAULT_QUIET,
+    state_path: Annotated[
+        Path | None, typer.Option("--state", help="Watch state JSON file (default: user cache).")
+    ] = None,
+) -> None:
+    """Watch INBOX and automatically organize newly arrived media.
+
+    Polls the inbox for new files, waits for each file's size/mtime to
+    stabilize and for a quiet period, then runs the same pipeline as
+    ``import`` over the batch. Defaults to dry-run: plans and reports
+    only. Pass ``--execute`` to actually copy (and to persist the watch
+    state). Runs until Ctrl-C.
+    """
+    base = load_config()
+    inbox = inbox or Path(base.inbox).expanduser()
+    dest_root = dest_root or Path(base.dest_root).expanduser()
+    config = Config(
+        inbox=str(inbox),
+        dest_root=str(dest_root),
+        mode=base.mode,
+        dry_run=not execute,
+        log_path=base.log_path,
+    )
+    state = WatchState(state_path)
+    components = default_components()
+    watcher = Watcher(
+        inbox=inbox,
+        callback=lambda batch: _process_batch(
+            batch, components, config, state, dry_run=not execute
+        ),
+        interval=interval,
+        settle=settle,
+        quiet=quiet,
+        scanner=components.scanner.scan,
+        pending=lambda path, size, mtime: state.needs_retry(path, size, mtime),
+    )
+
+    def _on_signal(_signum: int, _frame: FrameType | None) -> None:
+        watcher.stop()
+
+    previous_int = signal.getsignal(signal.SIGINT)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
+    typer.echo(
+        f"Watching {inbox} -> {dest_root} "
+        f"(interval={interval:g}s settle={settle:g}s quiet={quiet:g}s, "
+        f"{'execute' if execute else 'dry-run'})"
+    )
+    typer.echo(f"State: {state.path}")
+    typer.echo("Press Ctrl-C to stop.")
+    try:
+        watcher.start()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        state.flush()  # persist any in-flight marks on shutdown
+        signal.signal(signal.SIGINT, previous_int)
+        signal.signal(signal.SIGTERM, previous_term)
+    typer.echo("Stopped.")
+
+
+def _process_batch(
+    batch: list[DiscoveredFile],
+    components: PipelineComponents,
+    config: Config,
+    state: WatchState,
+    dry_run: bool,
+) -> None:
+    """Ingest one quiescent batch through the standard pipeline.
+
+    Reuses the same loader / resolver / planner / executor as ``import``,
+    so VIDEO, NEF and JPG all flow through one chain. Dry-run only prints
+    a summary and never touches the state file. Execute mode marks each
+    file ``in_progress`` (persisted before copying, for crash recovery),
+    then records a file ``done`` only when its destination actually exists
+    — everything else stays retryable.
+    """
+    batch = sorted(batch, key=lambda file: str(file.path))
+    if not batch:
+        return
+
+    records = components.loader.load(batch)
+    location_results = components.resolver.resolve(records)
+    actions = plan_actions(records, Path(config.dest_root), location_results)
+
+    total_bytes = sum(file.size for file in batch)
+    typer.echo(f"[batch] {len(batch)} file(s), {total_bytes} bytes")
+    for file in batch:
+        typer.echo(f"  {file.path}")
+    if actions:
+        typer.echo("[batch] planned destinations:")
+        for action in actions:
+            typer.echo(f"  {action.source.name} -> {action.dest}")
+    else:
+        typer.echo("[batch] no planned actions")
+
+    if dry_run:
+        typer.echo("[batch] dry-run: nothing copied, no state written")
+        return
+
+    for file in batch:
+        try:
+            st = file.path.stat()
+        except OSError:
+            continue
+        state.mark_in_progress(file.path, st.st_size, st.st_mtime)
+    state.flush()  # persist in-progress marks before copying
+
+    report = Executor(config).execute(actions)
+
+    action_by_source = {action.source: action for action in actions}
+    for file in batch:
+        try:
+            st = file.path.stat()
+        except OSError:
+            continue
+        planned = action_by_source.get(file.path)
+        if planned is not None and planned.dest.is_file():
+            state.mark_done(file.path, st.st_size, st.st_mtime)
+        else:
+            state.mark_failed(file.path, st.st_size, st.st_mtime)
+    state.flush()
+
+    typer.echo(
+        f"[batch] success:{report.success} failed:{report.failed} skipped:{report.skipped}"
+    )
 
 
 def _import_config(source: Path, destination: Path, execute: bool) -> Config:
