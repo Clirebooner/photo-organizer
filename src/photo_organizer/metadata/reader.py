@@ -54,6 +54,20 @@ def _suffix_kind(path: Path) -> MediaKind:
     raise MetadataError(f"unsupported file type: {path.name!r}")
 
 
+def _video_record(path: Path) -> PhotoRecord:
+    """PhotoRecord for a video: no EXIF, file mtime as the capture time.
+
+    exifread cannot parse MOV/MP4 (it raises ``ExifNotFound`` internally),
+    so videos bypass EXIF parsing entirely and use the file modification
+    time — the same fallback non-EXIF photos use.
+    """
+    return PhotoRecord(
+        source_path=path,
+        media_kind=MediaKind.VIDEO,
+        captured_at=datetime.fromtimestamp(path.stat().st_mtime),
+    )
+
+
 def _tag(tags: dict[str, Any], *names: str) -> str | None:
     """Printable string of the first matching tag, stripped; else None."""
     for name in names:
@@ -159,11 +173,15 @@ class ExifReader:
     def read(self, path: Path) -> PhotoRecord:
         """Extract metadata from *path* using ``exifread``.
 
-        ``captured_at`` comes from EXIF DateTimeOriginal, falling back to
-        DateTimeDigitized, then to the file modification time (mtime —
-        NOT creation time, for cross-platform consistency). Camera
-        make/model, lens, ISO, exposure, aperture, focal length and GPS
-        are read best-effort and left ``None`` when absent.
+        Videos (per :func:`_suffix_kind`) skip EXIF parsing entirely —
+        exifread cannot read MOV/MP4 and would warn — and use the file
+        modification time as ``captured_at`` (see :func:`_video_record`).
+        Every other type goes through ``exifread``: ``captured_at`` comes
+        from EXIF DateTimeOriginal, falling back to DateTimeDigitized,
+        then to the file mtime (NOT creation time, for cross-platform
+        consistency). Camera make/model, lens, ISO, exposure, aperture,
+        focal length and GPS are read best-effort and left ``None`` when
+        absent.
 
         Raises:
             MetadataError: if the file is missing, of an unsupported
@@ -172,6 +190,10 @@ class ExifReader:
         path = Path(path)
         if not path.is_file():
             raise MetadataError(f"file not found: {path}")
+
+        media_kind = _suffix_kind(path)
+        if media_kind is MediaKind.VIDEO:
+            return _video_record(path)
 
         try:
             with path.open("rb") as stream:
@@ -187,7 +209,7 @@ class ExifReader:
 
         return PhotoRecord(
             source_path=path,
-            media_kind=_suffix_kind(path),
+            media_kind=media_kind,
             captured_at=captured_at,
             camera_make=_tag(tags, "Image Make"),
             camera_model=_tag(tags, "Image Model"),

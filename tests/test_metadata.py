@@ -1,5 +1,6 @@
 """Unit tests for the metadata reader's pure helpers."""
 
+import os
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,3 +49,45 @@ def test_mtime_fallback_when_no_exif_date(monkeypatch, tmp_path: Path) -> None:
     assert isinstance(record.captured_at, datetime)
     assert record.camera_model is None
     assert record.gps is None
+
+
+def test_video_skips_exifread_and_uses_mtime(monkeypatch, tmp_path: Path) -> None:
+    """Videos bypass EXIF parsing and use the file mtime as capture time."""
+    path = tmp_path / "clip.MOV"
+    path.write_bytes(b"video bytes")
+    os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    calls: list[object] = []
+
+    def fake_process(stream: object) -> dict[str, object]:
+        calls.append(stream)
+        return {"EXIF DateTimeOriginal": "2020:01:01 00:00:00"}  # never used
+
+    monkeypatch.setattr(exifread, "process_file", fake_process)
+
+    record = ExifReader().read(path)
+
+    assert calls == []  # exifread is never invoked for a video
+    assert record.media_kind is MediaKind.VIDEO
+    assert record.captured_at == datetime.fromtimestamp(1_700_000_000)
+    assert record.camera_model is None
+    assert record.gps is None
+
+
+def test_image_still_goes_through_exifread(monkeypatch, tmp_path: Path) -> None:
+    """Non-video files keep the existing EXIF parsing path."""
+    path = tmp_path / "shot.jpg"
+    path.write_bytes(b"jpeg bytes")
+    calls: list[object] = []
+
+    def fake_process(stream: object) -> dict[str, object]:
+        calls.append(stream)
+        return {"EXIF DateTimeOriginal": "2020:06:05 10:30:00"}
+
+    monkeypatch.setattr(exifread, "process_file", fake_process)
+
+    record = ExifReader().read(path)
+
+    assert len(calls) == 1
+    assert record.media_kind is MediaKind.IMAGE
+    assert record.captured_at == datetime(2020, 6, 5, 10, 30, 0)
