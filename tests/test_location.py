@@ -268,7 +268,7 @@ def test_archive_uses_locality_over_municipality() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Non-CJK municipality suffix stripping (archive only)
+# Non-CJK municipality suffix stripping + archive aliases (archive only)
 # ---------------------------------------------------------------------------
 
 
@@ -279,6 +279,29 @@ def test_archive_strips_resort_municipality_suffix() -> None:
     assert _norm(info, LocationMode.ARCHIVE) == "Whistler"
 
 
+@pytest.mark.parametrize("field", ["city", "town", "locality", "village", "municipality"])
+def test_archive_strips_resort_municipality_suffix_from_any_admin_field(field: str) -> None:
+    # Nominatim often carries the full legal name in ``city`` rather than
+    # ``municipality``; the suffix must drop from whichever field wins.
+    info = LocationInfo(
+        country_code="CA", country="Canada", **{field: "Whistler Resort Municipality"}
+    )
+    assert _norm(info, LocationMode.ARCHIVE) == "Whistler"
+
+
+def test_archive_aliases_central_saanich_city_to_victoria() -> None:
+    info = LocationInfo(country_code="CA", country="Canada", city="Central Saanich")
+    assert _norm(info, LocationMode.ARCHIVE) == "Victoria"
+
+
+def test_archive_alias_kept_outside_archive() -> None:
+    info = LocationInfo(
+        country_code="CA", country="Canada", municipality="Central Saanich"
+    )
+    assert _norm(info, LocationMode.ADMIN) == "Central_Saanich"
+    assert _norm(info, LocationMode.DETAIL) == "Central_Saanich"
+
+
 def test_archive_strips_regional_municipality_suffix() -> None:
     info = LocationInfo(
         country_code="CA", country="Canada", municipality="Halifax Regional Municipality"
@@ -286,11 +309,11 @@ def test_archive_strips_regional_municipality_suffix() -> None:
     assert _norm(info, LocationMode.ARCHIVE) == "Halifax"
 
 
-def test_archive_keeps_plain_municipality_name() -> None:
+def test_archive_aliases_central_saanich_municipality_to_victoria() -> None:
     info = LocationInfo(
         country_code="CA", country="Canada", municipality="Central Saanich"
     )
-    assert _norm(info, LocationMode.ARCHIVE) == "Central_Saanich"
+    assert _norm(info, LocationMode.ARCHIVE) == "Victoria"
 
 
 def test_municipality_suffix_kept_outside_archive() -> None:

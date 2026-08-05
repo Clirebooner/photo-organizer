@@ -5,7 +5,8 @@ for a given :class:`LocationMode`:
 
 - ``archive`` — folder names; broad, archive-friendly (scenic area /
   attraction over a specific POI; non-CJK municipality type words such
-  as "Resort Municipality" are stripped).
+  as "Resort Municipality" are stripped from any admin field; a few
+  archive aliases apply, e.g. "Central Saanich" -> "Victoria").
 - ``detail`` — logs/preview; the most specific place (POI first).
 - ``admin`` — pure administrative division.
 
@@ -90,6 +91,13 @@ _MUNICIPALITY_SUFFIXES = (
     "Municipality",
 )
 
+# Archive-only name overrides: exact place names whose raw administrative
+# name is not what users want in a folder name — e.g. the Capital Regional
+# District municipality "Central Saanich" is archived as "Victoria".
+_ARCHIVE_ALIASES = {
+    "Central Saanich": "Victoria",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -141,13 +149,15 @@ def _strip_suffixes(name: str, suffixes: tuple[str, ...]) -> str:
     return name
 
 
-def _strip_municipality_suffix(name: str) -> str:
+def _strip_municipality_suffix(name: str | None) -> str | None:
     """Drop a trailing administrative type from a municipality name.
 
     Only the type words are removed — "Whistler Resort Municipality" ->
     "Whistler" — and a plain place name such as "Central Saanich" is left
-    untouched.
+    untouched. ``None`` passes through unchanged.
     """
+    if not name:
+        return name
     for suffix in _MUNICIPALITY_SUFFIXES:
         if name.endswith(suffix) and len(name) > len(suffix):
             stripped = name[: -len(suffix)].strip()
@@ -213,24 +223,27 @@ class LocationNameNormalizer:
 
         Overseas archives read most naturally as a scenic area or place,
         so administrative granularity only kicks in after the named places.
-        Municipality names drop their legal type word (e.g. "Whistler
-        Resort Municipality" -> "Whistler").
+        Legal municipality type words drop off no matter which field carries
+        them — "Whistler Resort Municipality" -> "Whistler" whether it
+        arrives in ``city``, ``town``, ``locality``, ``village`` or
+        ``municipality``. ``_ARCHIVE_ALIASES`` then remaps a few places to
+        the archive name users expect (e.g. "Central Saanich" -> "Victoria").
         """
-        municipality = (
-            _strip_municipality_suffix(info.municipality) if info.municipality else None
-        )
-        return _first(
+        name = _first(
             info.park_name,
             info.poi_name,
-            info.city,
-            info.town,
-            info.locality,
-            info.village,
-            municipality,
+            _strip_municipality_suffix(info.city),
+            _strip_municipality_suffix(info.town),
+            _strip_municipality_suffix(info.locality),
+            _strip_municipality_suffix(info.village),
+            _strip_municipality_suffix(info.municipality),
             info.admin2,
             info.admin1,
             info.country,
         )
+        if not name:
+            return None
+        return _ARCHIVE_ALIASES.get(name, name)
 
     def _admin_non_cjk(self, info: LocationInfo) -> str | None:
         return _first(
