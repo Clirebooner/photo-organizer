@@ -224,6 +224,20 @@ dry_run = true                        # true: 只规划不落盘
 
 需要 exiftool 的测试用 `pytest.mark.skipif` 在缺失二进制时自动跳过。
 
+### Watcher `--execute` 集成验证脚本
+
+`tests/watch_execute_verify.sh` 验证 watcher 的**真实 `--execute` 行为**（非 dry-run）：真实复制到目标库、状态文件落盘且含 done 记录、重启后相同 size/mtime 的已处理文件不再触发批次、目标内容与源一致。运行：
+
+```bash
+bash tests/watch_execute_verify.sh
+```
+
+- **全断言通过**：自动清理本轮临时目录（`/tmp/watchvfy.*`）。
+- **任一断言失败**：保留临时目录作为现场，打印检查指引与 `rm -rf` 删除命令。
+- 全程使用隔离的临时 inbox / dest / watch-state / config（含 executor 日志），强制临时 `--state`，不碰 `~/.cache/photo-organizer/`；**不得触碰**：
+  - `/mnt/d/Photography_Progress_Test`
+  - `/mnt/d/Photography_Progress_Test_inbox`
+
 ---
 
 ## 11. 扩展性路线图
