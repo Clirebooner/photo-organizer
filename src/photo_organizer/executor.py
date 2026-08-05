@@ -5,11 +5,16 @@ The only module allowed to write to the destination tree. Honors
 
 - **Dry-run** logs the ``source -> destination`` lines for every action
   and touches nothing — no directories, no copies.
-- **Copy** mode applies ``COPY`` actions with :func:`shutil.copy2` (file
-  metadata preserved), never overwrites an existing destination, checks
-  the copied size against the source, and never lets one failed file stop
-  the batch. An optional :class:`ProgressReporter` receives per-action
-  events in copy mode only — a dry run never triggers a single event.
+- **Copy** mode applies ``COPY`` actions by writing to a unique sibling
+  ``.part-`` temp file, verifying its size against the source, and then
+  atomically renaming it into place with :func:`os.replace` (metadata
+  preserved via :func:`shutil.copy2`). It never overwrites an existing
+  destination, and never lets one failed file stop the batch. Because the
+  final file only ever appears via an atomic rename, a hard interruption
+  leaves at most an ignorable temp file — never a half-written archive a
+  later run would mistake for complete. An optional
+  :class:`ProgressReporter` receives per-action events in copy mode only —
+  a dry run never triggers a single event.
 
 ``MOVE``/``SYMLINK`` are not implemented in v1 and are counted as
 skipped; a source file is never deleted.
@@ -18,12 +23,14 @@ skipped; a source file is never deleted.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from photo_organizer.config import Config
 from photo_organizer.domain.models import ActionKind, PlannedAction
@@ -104,10 +111,11 @@ class Executor:
         """Apply *actions* to the filesystem and return a report.
 
         Dry-run (the default) only logs ``source -> destination``; copy
-        mode creates the destination directory, copies with
-        :func:`shutil.copy2`, and validates the copied size. An existing
-        destination is skipped (never overwritten), non-COPY kinds are
-        skipped, and a failed action never stops the batch.
+        mode creates the destination directory, copies each file to a
+        sibling ``.part-`` temp file, validates the copied size, and
+        atomically renames it into place. An existing destination is
+        skipped (never overwritten), non-COPY kinds are skipped, and a
+        failed action never stops the batch.
 
         *reporter* (optional) receives progress events in copy mode only;
         a dry run never invokes it. The returned report stays the source
@@ -190,21 +198,41 @@ class Executor:
         )
 
     def _copy(self, action: PlannedAction) -> None:
-        """Copy one action's source to its destination with metadata.
+        """Copy one action's source to its destination, atomically.
+
+        The bytes are written to a unique sibling ``.part-`` temp file,
+        checked against the source size, then :func:`os.replace` moves the
+        verified file into place in a single atomic step. A hard
+        interruption mid-copy therefore leaves only an ignorable temp file
+        — dot-prefixed, never mistaken for a finished archive — while the
+        final destination never exists half-written, so a later run
+        re-copies instead of wrongly skipping it.
+
+        An existing destination is never overwritten: the batch-level
+        ``execute`` skips it before this is reached, and the guard here
+        turns a destination that appeared during the copy into an error.
 
         Raises:
-            OSError: source missing, the copy failed, or the copied size
-                does not match the source.
+            OSError: the copy failed, the copied size did not match the
+                source, or the destination already exists.
         """
         if not action.source.is_file():
             raise FileNotFoundError(f"source does not exist: {action.source}")
         action.dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(action.source, action.dest)
-        if not _same_size(action.source, action.dest):
-            raise OSError(
-                "size mismatch after copy: "
-                f"{action.source.stat().st_size} != {action.dest.stat().st_size}"
-            )
+        tmp = action.dest.parent / _temp_name(action.dest)
+        try:
+            shutil.copy2(action.source, tmp)
+            if not _same_size(action.source, tmp):
+                raise OSError(
+                    "size mismatch after copy: "
+                    f"{action.source.stat().st_size} != {tmp.stat().st_size}"
+                )
+            if action.dest.exists():
+                raise FileExistsError(f"destination already exists: {action.dest}")
+            os.replace(tmp, action.dest)
+        except Exception:
+            _remove_quietly(tmp)
+            raise
 
 
 def _report_done(
@@ -220,6 +248,24 @@ def _report_done(
 
 def _same_size(source: Path, dest: Path) -> bool:
     return source.stat().st_size == dest.stat().st_size
+
+
+def _temp_name(dest: Path) -> str:
+    """A unique sibling temp name for *dest*.
+
+    The leading dot keeps it hidden from the scanner, and the ``.part-``
+    token separates it from any real archive name; the pid plus a fresh
+    uuid makes two copies for the same *dest* collision-proof.
+    """
+    return f".{dest.name}.part-{os.getpid()}-{uuid4().hex}"
+
+
+def _remove_quietly(path: Path) -> None:
+    """Best-effort removal of a temp file; never masks the original error."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("could not remove partial copy %s: %s", path, exc)
 
 
 def _ensure_log_file(log_path: str | Path) -> None:

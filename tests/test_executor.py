@@ -41,6 +41,12 @@ def _write(path: Path, data: bytes) -> Path:
     return path
 
 
+def _leftover_parts(dest: Path) -> list[Path]:
+    """Any ``.name.part-*`` work files left next to *dest*."""
+    prefix = f".{dest.name}.part-"
+    return sorted(p for p in dest.parent.iterdir() if p.name.startswith(prefix))
+
+
 # ---------------------------------------------------------------------------
 # Dry-run
 # ---------------------------------------------------------------------------
@@ -101,6 +107,39 @@ def test_copy_preserves_metadata(tmp_path: Path) -> None:
     assert dest.stat().st_mtime == 1_700_000_000
 
 
+def test_atomic_copy_leaves_final_no_temp(tmp_path: Path) -> None:
+    source = _write(tmp_path / "inbox" / "DSC001.NEF", b"x" * 2048)
+    dest = tmp_path / "out" / "RAW" / "DSC001.NEF"
+
+    report = Executor(_config(tmp_path, dry_run=False)).execute([_action(source, dest)])
+
+    assert report.success == 1
+    assert report.failed == 0
+    assert dest.is_file()
+    assert dest.read_bytes() == b"x" * 2048
+    assert _leftover_parts(dest) == []  # no .part temp remains
+
+
+def test_copy_failure_cleans_temp_no_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write(tmp_path / "inbox" / "DSC001.NEF", b"x" * 100)
+    dest = tmp_path / "out" / "RAW" / "DSC001.NEF"
+
+    def failing_copy2(_source: Path, _dest: Path) -> None:
+        Path(_dest).write_bytes(b"partial")  # interrupted mid-write
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copy2", failing_copy2)
+
+    report = Executor(_config(tmp_path, dry_run=False)).execute([_action(source, dest)])
+
+    assert report.failed == 1
+    assert report.success == 0
+    assert not dest.exists()
+    assert _leftover_parts(dest) == []  # partial temp cleaned up
+
+
 def test_existing_destination_skipped_not_overwritten(tmp_path: Path) -> None:
     source = _write(tmp_path / "src.NEF", b"new content")
     dest = _write(tmp_path / "out" / "dst.NEF", b"old content")
@@ -111,6 +150,7 @@ def test_existing_destination_skipped_not_overwritten(tmp_path: Path) -> None:
     assert report.success == 0
     assert report.failed == 0
     assert dest.read_bytes() == b"old content"  # never overwritten
+    assert _leftover_parts(dest) == []  # skip happens before any temp exists
 
 
 def test_missing_source_recorded_as_failure(tmp_path: Path) -> None:
@@ -176,6 +216,8 @@ def test_size_mismatch_recorded_as_failure(
     assert report.success == 0
     assert len(report.errors) == 1
     assert "size mismatch" in report.errors[0]
+    assert not dest.exists()  # a bad copy is never left as the final file
+    assert _leftover_parts(dest) == []  # the mismatched temp is cleaned up
 
 
 def test_report_counts(tmp_path: Path) -> None:
